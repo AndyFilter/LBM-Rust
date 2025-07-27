@@ -1,11 +1,13 @@
 use crate::{MyApp};
 use std::fmt::Display;
+use std::ops::{Range, RangeBounds, RangeInclusive};
 use std::time::Instant;
+use crate::boundary::{BoundaryGroup, BoundaryType, Rect};
 
 static SIZE_X: usize = 100;
 static SIZE_Y: usize = 200;
 const DIRECTION_COUNT: usize = 9;
-pub(crate) const MIN_DENSITY_VAL: f32 = 1.0;
+pub(crate) const MIN_DENSITY_VAL: f32 = 1f32;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub(crate) enum CellType {
@@ -27,58 +29,36 @@ impl TryFrom<u8> for CellType {
     }
 }
 
-#[derive(PartialEq, Debug, Clone, Copy)]
-pub(crate) enum WallType {
-    WallBounceBack,
-    WallSymmetric,
-    WallDirichlet,
-    WallOpen,
-}
-
-impl TryFrom<u8> for WallType {
-    type Error = ();
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            x if x == WallType::WallBounceBack as u8 => Ok(WallType::WallBounceBack),
-            x if x == WallType::WallSymmetric as u8 => Ok(WallType::WallSymmetric),
-            x if x == WallType::WallDirichlet as u8 => Ok(WallType::WallDirichlet),
-            x if x == WallType::WallOpen as u8 => Ok(WallType::WallOpen),
-            _ => Err(()),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CellInfo {
-    pub(crate) cell_type: CellType,
-    pub(crate) wall_type: WallType,
-    pub(crate) in_fn: [f32; DIRECTION_COUNT],
-    eq_fn: [f32; DIRECTION_COUNT],
-    pub(crate) out_fn: [f32; DIRECTION_COUNT],
-    pub(crate) density: f32,
-    pub(crate) velocity: [f32; 2],
+pub struct CellInfo {
+    pub cell_type: CellType,
+    //pub boundary_type: BoundaryType,
+    pub in_fn: [f32; DIRECTION_COUNT],
+    pub eq_fn: [f32; DIRECTION_COUNT],
+    pub out_fn: [f32; DIRECTION_COUNT],
+    pub density: f32,
+    pub velocity: [f32; 2],
 }
 
 impl Display for CellInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?};{};{}", self.out_fn, self.cell_type as u8, self.wall_type as u8)
-        //write!(f, "{:?};{};{};{}", self.velocity, self.density, self.cell_type as u8, self.wall_type as u8) // Zamiana formatu na {vx,vy}{rho}
+        write!(f, "{:?};{}", self.out_fn, self.cell_type as u8)
+        //write!(f, "{:?};{};{};{}", self.velocity, self.density, self.cell_type as u8, self.wall_type as u8) // Different formatting - {vx,vy}{rho}
     }
 }
 
 impl CellInfo {
-    fn new_boundary(density: f32, cell_type: CellType, wall_type: WallType) -> Self {
-        Self {
-            in_fn: [0f32; DIRECTION_COUNT],
-            eq_fn: [0f32; DIRECTION_COUNT],
-            out_fn: [0f32; DIRECTION_COUNT],
-            density,
-            cell_type,
-            wall_type,
-            velocity: [0f32; 2],
-        }
-    }
+    // fn new_boundary(density: f32, cell_type: CellType, boundary_type: BoundaryType) -> Self {
+    //     Self {
+    //         in_fn: [0f32; DIRECTION_COUNT],
+    //         eq_fn: [0f32; DIRECTION_COUNT],
+    //         out_fn: [0f32; DIRECTION_COUNT],
+    //         density,
+    //         cell_type,
+    //         //boundary_type,
+    //         velocity: [0f32; 2],
+    //     }
+    // }
 
     fn new(density: f32, cell_type: CellType) -> Self {
         Self {
@@ -87,7 +67,7 @@ impl CellInfo {
             out_fn: [0f32; DIRECTION_COUNT],
             density,
             cell_type,
-            wall_type: WallType::WallBounceBack,
+            //boundary_type: BoundaryType::WallBounceBack,
             velocity: [0f32; 2],
         }
     }
@@ -99,7 +79,7 @@ impl Default for CellInfo {
     }
 }
 
-// None, Forrest, Terrain, Water, City, Fire, Burned
+// Space, Boundary
 pub(crate) static PLOT_COLORS_U8: [[u8; 4]; 8usize] = [
     //[32, 32, 32, 255],
     [0, 0, 0, 255],
@@ -113,94 +93,103 @@ pub(crate) static PLOT_COLORS_U8: [[u8; 4]; 8usize] = [
     [39, 39, 39, 255],
 ];
 
+// +1 / -1 index reflection sorted
+const NEIGHBORS: [(i32, i32); 9] = [
+(0, 0),
+(1, 0),
+(-1, 0),
+(0, 1),
+(0, -1),
+(1, 1),
+(-1, -1),
+(1, -1),
+(-1, 1),
+];
+const WEIGHTS: [f32; 9] = [
+4.0 / 9.0,
+1.0 / 9.0,
+1.0 / 9.0,
+1.0 / 9.0,
+1.0 / 9.0,
+1.0 / 36.0,
+1.0 / 36.0,
+1.0 / 36.0,
+1.0 / 36.0,
+];
+
 impl Default for MyApp {
     fn default() -> Self {
         let mut sim = vec![vec![CellInfo::default(); SIZE_Y]; SIZE_X];
 
-        //let neighbors = [(1, 0), (0, -1i32), (-1i32, 0), (0, 1)];
+        // Add bounceback boundary around
+        let mut b_conds: Vec<BoundaryGroup> = Vec::new();
+        // Horizontal flow
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0i32, 0i32, SIZE_X as i32, 1i32), BoundaryType::WallDirichlet, 0f32)); // Top wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0, SIZE_Y as i32 - 1, SIZE_X as i32, 1), BoundaryType::WallDirichlet, 0f32)); // Bottom wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0, 0, 1, SIZE_Y as i32), BoundaryType::WallDirichlet, 0.01f32)); // Left wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(SIZE_X as i32 - 1, 0, 1, SIZE_Y as i32), BoundaryType::WallDirichlet, 0f32)); // Right wall
+        //
+        // b_conds.push(BoundaryGroup::new(Rect::new_all((SIZE_X / 3) as i32, 0, 1, (3 * SIZE_Y / 4) as i32), BoundaryType::WallDirichlet, 0f32));
+        // b_conds.push(BoundaryGroup::new(Rect::new_all((2 * SIZE_X / 3) as i32, (1 * SIZE_Y / 4) as i32, 1, (3 * SIZE_Y / 4) as i32), BoundaryType::WallDirichlet, 0f32));
+
+
+        // Vertical flow
+        b_conds.push(BoundaryGroup::new(Rect::new_all(0i32, 0i32, SIZE_X as i32, 1i32), BoundaryType::WallDirichlet, 0.03f32)); // Top wall
+        b_conds.push(BoundaryGroup::new(Rect::new_all(0, SIZE_Y as i32 - 1, SIZE_X as i32, 1), BoundaryType::WallOpen, 0.97f32)); // Bottom wall
+        b_conds.push(BoundaryGroup::new(Rect::new_all(0, 0, 1, SIZE_Y as i32), BoundaryType::WallSymmetric, 0f32)); // Left wall
+        b_conds.push(BoundaryGroup::new(Rect::new_all(SIZE_X as i32 - 1, 0, 1, SIZE_Y as i32), BoundaryType::WallSymmetric, 0f32)); // Right wall
+
+        b_conds.push(BoundaryGroup::new(Rect::new_all((1 * SIZE_X / 4) as i32, (SIZE_Y / 5) as i32, (3 * SIZE_X / 4) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+        b_conds.push(BoundaryGroup::new(Rect::new_all((0 * SIZE_X / 4) as i32, (2 * SIZE_Y / 5) as i32, (3 * SIZE_X / 4) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+        b_conds.push(BoundaryGroup::new(Rect::new_all(0, (3 * SIZE_Y / 5) as i32, (3 * SIZE_X / 4) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+        b_conds.push(BoundaryGroup::new(Rect::new_all((1 * SIZE_X / 4) as i32, (4 * SIZE_Y / 5) as i32, (3 * SIZE_X / 4) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+        b_conds.push(BoundaryGroup::new(Rect::new_all((5 * SIZE_X / 6) as i32, (1 * SIZE_Y / 2) as i32, (1 * SIZE_X / 10) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+
+        b_conds.push(BoundaryGroup::new(Rect::new_all(1, (4 * SIZE_Y / 9) as i32, 1, (1 * SIZE_Y / 8) as i32), BoundaryType::WallOpen, 0.92f32)); // Left wall
+
+        // Vertical turbulent test
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0i32, 0i32, SIZE_X as i32, 1i32), BoundaryType::WallOpen, 1.0f32)); // Top wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all((3 * SIZE_X / 7) as i32, 2, (1 * SIZE_X / 7) as i32, 1), BoundaryType::WallDirichlet, 0.3f32)); // Top wall emitter
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0, SIZE_Y as i32 - 1, SIZE_X as i32, 1), BoundaryType::WallOpen, 0.9f32)); // Bottom wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(0, 0, 1, SIZE_Y as i32), BoundaryType::WallSymmetric, 0f32)); // Left wall
+        // b_conds.push(BoundaryGroup::new(Rect::new_all(SIZE_X as i32 - 1, 0, 1, SIZE_Y as i32), BoundaryType::WallSymmetric, 0f32)); // Right wall
+
+        b_conds.push(BoundaryGroup::new(Rect::new_all((3 * SIZE_X / 7) as i32, (1 * SIZE_Y / 2) as i32, (1 * SIZE_X / 7) as i32, 1), BoundaryType::WallSymmetric, 0f32));
+
+        for b_cond in b_conds.iter() {
+            // Loop over the entire area of the boundary group
+
+            // Set the cells for all boundary condition to type wall
+            for x in b_cond.rect.min.0..b_cond.rect.max.0 {
+                for y in b_cond.rect.min.1..b_cond.rect.max.1 {
+                    let (x, y) = ((x as usize), (y as usize));
+                    sim[x][y].cell_type = CellType::CellTypeWall;
+                }
+            }
+        }
+
         for x in 0..sim.len() {
             for y in 0..sim[0].len() {
-                if x <= 1 || y <= 1 || x >= sim.len() - 2 || y >= sim[0].len() - 2 {
-                    //sim[x][y].density = 0f32;
-                    sim[x][y].cell_type = CellType::CellTypeWall;
-                    //if x < 2 || x > SIZE_N - 3 {
-                    sim[x][y].wall_type = WallType::WallDirichlet;
-                    //}
-
-                    if y <= 1 {
-                        sim[x][y].wall_type = WallType::WallSymmetric;
-                    } else if y >= SIZE_Y - 3 {
-                        sim[x][y].wall_type = WallType::WallBounceBack;
-                    }
-                    //
-                    // if x < 2 {
-                    //     sim[x][y].wall_type = WallType::WallDirichlet;
-                    // }
-                } else if x < SIZE_X / 4 {
-                    // if random::<u8>() <= 255 {
-                    //     sim[x][y].in_fn[0] = 1.0; // = 4f32;
-                    //     sim[x][y].density = 1.0;
-                    // }
-                    // if random::<u8>() <= 100 {
-                    //     //sim[x][y].cell_type = CellTypeGas;
-                    //     sim[x][y].in_fn[(random::<u8>() % DIRECTION_COUNT as u8) as usize] = (random::<u8>() % 20u8) as f32;
-                    //     sim[x][y].density = sim[x][y].in_fn.iter().sum();
-                    // }
-                    //sim[x][y].in_fn[0] = 1.0;
-                    sim[x][y].density = 1.0;
-                } else if (x >= SIZE_X / 2 - 2 && x <= SIZE_X / 2 + 1) && y > 2*SIZE_Y / 3 {
-                    sim[x][y].cell_type = CellType::CellTypeWall;
-                    sim[x][y].wall_type = WallType::WallBounceBack;
-                    // if y > N / 2 - (N / 6) && y < N / 2 + (N / 6) {
-                    //     sim[x][y].density = MIN_DENSITY_VAL;
-                    // } else {
-                    //     sim[x][y].cell_type = CellTypeWall;
-                    // }
-
-                    //sim[x][y].density = MIN_DENSITY_VAL;
-                    //sim[x][y].density = 0.9f32;
+                if sim[x][y].cell_type == CellType::CellTypeWall {
+                    continue;
                 }
-                // else if x > 2 && y > 2 && ((x - 2*N/3).pow(2) + (y - N/2).pow(2)) < 75 {
-                //     sim[x][y].cell_type = CellTypeWall;
-                // }
-                else {
-                    //sim[x][y].in_fn[0] = 1.0; // = 4f32;
+                if x < SIZE_X / 3 {
+                    sim[x][y].density = 1.0;
+                } else {
                     sim[x][y].density = MIN_DENSITY_VAL;
                 }
             }
         }
 
-        let neighbors = [
-            (0, 0),
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (-1, 1),
-            (-1, -1),
-            (1, -1),
-        ];
-        let weights = [
-            4.0 / 9.0,
-            1.0 / 9.0,
-            1.0 / 9.0,
-            1.0 / 9.0,
-            1.0 / 9.0,
-            1.0 / 36.0,
-            1.0 / 36.0,
-            1.0 / 36.0,
-            1.0 / 36.0,
-        ];
         for x in 0..sim.len() {
             for y in 0..sim[0].len() {
                 let mut cell = &mut sim[x][y];
                 if cell.cell_type == CellType::CellTypeWall {
                     continue;
                 }
-                for (i, &e) in neighbors.iter().enumerate() {
+                for (i, &e) in NEIGHBORS.iter().enumerate() {
 
-                    cell.eq_fn[i] = weights[i] * cell.density;
+                    cell.eq_fn[i] = WEIGHTS[i] * cell.density;
                     cell.in_fn[i] = cell.eq_fn[i];
                 }
             }
@@ -208,19 +197,178 @@ impl Default for MyApp {
 
         Self {
             sim,
+            boundary_conditions: b_conds,
             sim_step: 0,
             last_sim_step: Instant::now(),
             img_texture: None,
             magnification: (800 / SIZE_Y) as f32,
             velocity_view: false,
+            show_trajectories: false,
             is_playing: false,
         }
     }
 }
 
+// Neighbor direction mapping
+#[derive(Clone, Copy)]
+pub enum BC_Direction {
+    CENTER = 0,
+    East = 1,
+    West = 2,
+    South = 3,
+    North = 4,
+    SE = 5,
+    NW = 6,
+    NE = 7,
+    SW = 8,
+}
 
+#[derive(Clone, Copy)]
+pub enum Side {
+    North = 4,
+    South = 3,
+    East = 1,
+    West = 2,
+}
 
-pub fn step_sim(state: &mut Vec<Vec<CellInfo>>, sim_step: &mut usize) {
+// Returns outward normal unit vector for each side:
+fn normal_out(side: Side) -> (i32, i32) {
+    match side {
+        Side::North => (0, -1),
+        Side::South => (0, 1),
+        Side::East  => (1, 0),
+        Side::West  => (-1, 0),
+    }
+}
+
+// Checks if direction i is unknown (would stream from outside) given outward normal:
+fn is_unknown(i: usize, n_out: (i32,i32)) -> bool {
+    let (cx, cy) = NEIGHBORS[i];
+    (cx * n_out.0 + cy * n_out.1) > 0
+}
+
+fn apply_velocity_bc(
+    state: &mut Vec<Vec<CellInfo>>,
+    x: usize,
+    y: usize,
+    side: Side,
+    b_cond: &BoundaryGroup,
+) {
+    let (u_x, u_y) = (0f32, b_cond.boundary_value);
+    let (nx, ny) = normal_out(side);
+    let u_dot_n = u_x *(nx as f32) + u_y *(ny as f32);
+
+    let cell = &state[x][y];
+    // sum_known
+    let sum_known = (0..9)
+        .into_iter()
+        .filter(|&i| !is_unknown(i, (nx, ny)))
+        .fold(0.0f32, |acc, i| acc + cell.in_fn[i]);
+
+    let opposite_mapping = [0, 2, 1, 4, 3, 6, 5, 8, 7];
+    let rho = sum_known / (1.0f32 - u_dot_n);
+
+    let cell = &mut state[x][y];
+    for i in 0..9 {
+        if is_unknown(i, (nx, ny)) {
+            let opp = opposite_mapping[i];
+            let (cx, cy) = NEIGHBORS[i];
+            if cx == 0 || cy == 0 {
+                // axis direction: this should be the index along normal
+                // f[i] = f[opp] + 2/3 * rho * u_n
+                cell.in_fn[i] = cell.in_fn[opp] + 2.0/3.0 * rho * u_dot_n;
+            } else {
+                // diagonal
+                let c_dot_u = (cx as f32)* u_x + (cy as f32)* u_y;
+                cell.in_fn[i] = cell.in_fn[opp] + (1.0/6.0)*rho*c_dot_u;
+            }
+        }
+    }
+
+}
+
+fn apply_open_bc(
+    state: &mut Vec<Vec<CellInfo>>,
+    x: usize,
+    y: usize,
+    side: Side,
+    b_cond: &BoundaryGroup,
+) {
+    // Prescribed density ρ0:
+    let rho0 = b_cond.boundary_value; // Assume boundary_value holds the density for WallOpen
+    // After streaming, the known distributions are in state[x][y].in_fn.
+    // Sum known f_i:
+    let (nx, ny) = normal_out(side);
+
+    let cell = &state[x][y];
+    let sum_known = (0..9)
+        .into_iter()
+        .filter(|&i| !is_unknown(i, (nx, ny)))
+        .fold(0.0f32, |acc, i| acc + cell.in_fn[i]);
+    // Compute normal velocity component u_n:
+    // For the side, derive formula analogous to west example. We implement generic:
+    // Let A = sum_known.
+    // Let sum_mom_known = sum_{i in known} c_{i,n} * f_i.
+
+    let sum_mom_known = NEIGHBORS.iter().enumerate()
+        .fold(0.0f32, |acc, (i, c)| {
+            if !is_unknown(i, (nx, ny)) {
+                // normal component c_{i,n} = dot( (cx,cy), normal basis ). But for unit normals aligned with axes,
+                // c_{i,n} = cx if side=East/West, or cy if side=North/South.
+                // Since normal_out gives (nx,ny) = ±(1,0) or ±(0,1), dot = cx*nx + cy*ny.
+                acc + (c.0 as f32)* (nx as f32) * cell.in_fn[i]  // equals c_{i,n} * f_i since nx or ny is 0/±1
+                    + (c.1 as f32)* (ny as f32) * cell.in_fn[i]
+            }
+            else {
+                acc
+            }
+        });
+
+    
+    // Unknown sum Σ_{i in unknown} f_i = rho0 - A.
+    // And Σ_{i in unknown} c_{i,n} f_i = (rho0 - A) * (+1), because for unknown i, c_{i,n}=+1 in normal coordinate (pointing into domain).
+    // So total ρ0 * u_n = sum_mom_known + (rho0 - A).
+    let u_n = (sum_mom_known + (rho0 - sum_known)) / rho0;
+    // Decide tangential component u_t:
+    // For simplicity, assume zero tangential velocity:
+    let u_t = 0.0;
+    // Construct full velocity vector (u_x,u_y) depending on side:
+    let (u_x, u_y) = match side {
+        Side::West  => (u_n, u_t),
+        Side::East  => (-u_n, u_t),
+        Side::South => (u_t, -u_n),
+        Side::North => (u_t, u_n),
+    };
+    // Note: verify sign conventions carefully: above formula assumed for West boundary normal is (-1,0) so c_{i,n}=+1 for unknown dirs.
+
+    let opposite_mapping = [0, 2, 1, 4, 3, 6, 5, 8, 7];
+
+    // Zou–He reconstruction:
+    {
+        let cell = &mut state[x][y];
+        for i in 0..9 {
+            if is_unknown(i, (nx, ny)) {
+                let opp = opposite_mapping[i];
+                let (cx, cy) = NEIGHBORS[i];
+                // Check if axis direction (|c|=1 and aligned with normal):
+                if (cx == 0 && cy == 0) {
+                    // Should not happen for unknown (f0 is known).
+                    continue;
+                }
+                if cx == 0 || cy == 0 {
+                    // axis: c aligned with x or y => this is the normal direction index
+                    cell.in_fn[i] = cell.in_fn[opp] + (2.0/3.0) * rho0 * u_n;
+                } else {
+                    // diagonal: f[i] = f[opp] + 1/6 * rho0 * (c_x * u_x + c_y * u_y)
+                    let c_dot_u = (cx as f32)*u_x + (cy as f32)*u_y;
+                    cell.in_fn[i] = cell.in_fn[opp] + (1.0/6.0) * rho0 * c_dot_u;
+                }
+            }
+        }
+    }
+}
+
+pub fn step_sim(mut state: &mut Vec<Vec<CellInfo>>, b_conds: &Vec<BoundaryGroup>, sim_step: &mut usize) {
     //let now = Instant::now();
     //let mut new_state: Vec<Vec<CellInfo>> = vec![vec![CellInfo::default(); N]; N];
 
@@ -232,42 +380,19 @@ pub fn step_sim(state: &mut Vec<Vec<CellInfo>>, sim_step: &mut usize) {
     let dt = 1f32;
     let tau = 1f32;
 
-    //let neighbors = [(1, 0), (0, -1i32), (-1i32, 0), (0, 1)];
-    // let neighbors = [
+    //let NEIGHBORS = [(1, 0), (0, -1i32), (-1i32, 0), (0, 1)];
+    // let NEIGHBORS = [
     //     (-1,1),(0,1),(1,1),(-1,0),(0,0),(1,0),(-1,-1),(0,-1),(1,-1),
     // ];
-    // let neighbors = [
+    // let NEIGHBORS = [
     //     (0,0), (1,0), (-1,0), (0,1), (0, -1), (1,1), (-1,1), (-1,-1), (1,-1)
     // ];
-    // +1 / -1 index reflection sorted
-    let neighbors = [
-        (0, 0),
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (-1, -1),
-        (1, -1),
-        (-1, 1),
-    ];
-    let weights = [
-        4.0 / 9.0,
-        1.0 / 9.0,
-        1.0 / 9.0,
-        1.0 / 9.0,
-        1.0 / 9.0,
-        1.0 / 36.0,
-        1.0 / 36.0,
-        1.0 / 36.0,
-        1.0 / 36.0,
-    ];
-    //let neighbors = [(1, 0), (-1i32, 0), (0, 1), (0, -1i32)];
+    //let NEIGHBORS = [(1, 0), (-1i32, 0), (0, 1), (0, -1i32)];
 
     // Collision
     for x in 1..n_x - 1 {
         for y in 1..n_y - 1 {
-            let mut cell = &mut state[x][y];
+            let cell = &mut state[x][y];
             // state.par_iter_mut().enumerate().for_each(|(x, row)| {
             //     row.par_iter_mut().enumerate().filter(|(_, a)| a.cell_type != CellTypeWall).for_each(|(y, cell)| {
             // state.par_chunks_mut(20).for_each(|chunk| {
@@ -281,7 +406,7 @@ pub fn step_sim(state: &mut Vec<Vec<CellInfo>>, sim_step: &mut usize) {
             }
             //let u = (cell.velocity[0], cell.velocity[1]);
             cell.density = cell.in_fn.iter().sum();
-            let mut u = neighbors
+            let mut u = NEIGHBORS
                 .iter()
                 .enumerate()
                 .fold((0.0, 0.0), |acc, (i, c)| {
@@ -294,186 +419,71 @@ pub fn step_sim(state: &mut Vec<Vec<CellInfo>>, sim_step: &mut usize) {
             cell.velocity[0] = u.0;
             cell.velocity[1] = u.1;
             let u_mag = 1.5 * (u.0.powi(2) + u.1.powi(2));
-            for (i, &e) in neighbors.iter().enumerate() {
+            for (i, &e) in NEIGHBORS.iter().enumerate() {
                 let (n_x, n_y) = (e.0 as f32, e.1 as f32);
                 let eu = (n_x * u.0 + n_y * u.1);
                 cell.eq_fn[i] =
-                    weights[i] * cell.density * (1.0 + 3.0 * eu + 4.5 * eu.powi(2) - u_mag);
+                    WEIGHTS[i] * cell.density * (1.0 + 3.0 * eu + 4.5 * eu.powi(2) - u_mag);
                 cell.out_fn[i] = cell.in_fn[i] + (dt / tau) * (cell.eq_fn[i] - cell.in_fn[i]);
             }
         }
     }
     //});
-
+    
     // Streaming
     for x in 1..n_x - 1 {
         for y in 1..n_y - 1 {
             if state[x][y].cell_type == CellType::CellTypeWall {
                 continue;
             }
-            for (i, &e) in neighbors.iter().enumerate() {
+            for (i, &e) in NEIGHBORS.iter().enumerate() {
                 let (new_x, new_y): (_, _) = ((x as i32 - e.0) as usize, (y as i32 - e.1) as usize);
 
                 if state[new_x][new_y].cell_type == CellType::CellTypeWall {
-                    // ----------------------- Boundary Conditions -----------------------
-                    match state[new_x][new_y].wall_type {
-                        WallType::WallBounceBack => {
-                            // if e.0 == 1 || (e.1 == 1 && e.0 == 0) {
-                            if i % 2 == 1 {
-                                state[x][y].in_fn[i] = state[x][y].out_fn[(i + 1)];
-                            } else {
-                                state[x][y].in_fn[i] = state[x][y].out_fn[(i - 1)];
-                            }
-                        }
-                        WallType::WallSymmetric => {
-                            // (0, 0),  0   -
-                            // (1, 0),  1   E
-                            // (-1, 0), 2   W
-                            // (0, 1),  3   S
-                            // (0, -1), 4   N
-                            // (1, 1),  5   SE
-                            // (-1, -1),6   NW
-                            // (1, -1), 7   NE
-                            // (-1, 1), 8   SW
-                            //let symmetric_mapping = [0,2,1,4,3,8,7,6,5];
-                            let symmetric_mapping = [0, 2, 1, 4, 3, 7, 8, 5, 6];
-                            state[x][y].in_fn[i] = state[x][y].out_fn[symmetric_mapping[i]];
-                        }
-                        WallType::WallDirichlet => {
-                            //let mut ux = 0.0f32;
-                            //if y < 20
-                            // All walls (ex. 1)
-                            //let ux = if new_x > 2 && new_x < n_x - 3 { if new_y < 2 {0.02} else {0.0} } else { (n_y-y) as f32 / n_y as f32 * 0.02 };
-                            let mut ux = 0.0f32;
-                            let mut top_sum = 0.0f32;
-                            let mut out_rho = 0.0f32;
-                            let mut uy = 0.0; //6.0 / out_rho * (cell.out_fn[1] - cell.out_fn[2] + cell.out_fn[6]);
-                            let (C, N, E, S, W, NE, NW, SE, SW) = (
-                                0usize, 4usize, 1usize, 3usize, 2usize, 7usize, 6usize, 5usize,
-                                8usize,
-                            );
-                            if new_x < 2 || new_x > n_x - 3 {
-                                // Vertical walls
-                                //println!("test");
-                                if new_x < 2 {
-                                    // left wall (West)
-                                    // state[x][y].in_fn[C] = state[x][y].out_fn[C];
-                                    // state[x][y].in_fn[W] = state[x][y].out_fn[W];
-                                    let cell = &state[x][y];
-                                    ux = (n_y - y) as f32 / n_y as f32 * 0.02;
-                                    top_sum = (cell.in_fn[C]
-                                        + cell.in_fn[S]
-                                        + cell.in_fn[N]
-                                        + 2.0 * (cell.in_fn[W] + cell.in_fn[SW] + cell.in_fn[NW]));
-                                    out_rho = top_sum / (1.0 - ux);
 
-                                    uy = 0.0; //6.0 * (state[x][y].in_fn[N] - state[x][y].in_fn[S] + state[x][y].in_fn[NW] - state[x][y].in_fn[SW]) / out_rho / (5.0 + 3.0 * ux);
-                                    state[x][y].in_fn[E] =
-                                        state[x][y].in_fn[W] + 2.0 / 3.0 * out_rho * ux;
-                                    state[x][y].in_fn[NE] =
-                                        state[x][y].in_fn[SW] + (ux - uy) / 6.0 * out_rho;
-                                    state[x][y].in_fn[SE] =
-                                        state[x][y].in_fn[NW] + (ux + uy) / 6.0 * out_rho;
-                                } else {
-                                    // right wall (East)
-                                    // state[x][y].in_fn[C] = state[x][y].out_fn[C];
-                                    // state[x][y].in_fn[E] = state[x][y].out_fn[E];
+                    let side = if i == BC_Direction::West as usize {
+                        Side::West
+                    } else if i == BC_Direction::East as usize {
+                        Side::East
+                    } else if i == BC_Direction::South as usize {
+                        Side::South
+                    } else if i == BC_Direction::North as usize {
+                        Side::North
+                    } else {
+                        continue; // only handle actual boundary nodes
+                    };
 
-                                    let cell = &state[x][y];
-                                    top_sum = (cell.in_fn[C]
-                                        + cell.in_fn[S]
-                                        + cell.in_fn[N]
-                                        + 2.0 * (cell.in_fn[E] + cell.in_fn[SE] + cell.in_fn[NE]));
-
-                                    // Boundary Ex. 1
-                                    //ux = (n_y - y) as f32 / n_y as f32 * 0.02;
-                                    //out_rho = top_sum / (1.0 + ux);
-
-                                    // Boundary Ex. 2
-                                    out_rho = 1.0;
-                                    ux = top_sum / out_rho - 1.0;
-
-                                    uy = 0.0; //6.0 * (state[x][y].in_fn[N] - state[x][y].in_fn[S] +
-                                    //state[x][y].in_fn[NE] - state[x][y].in_fn[SE]) / out_rho / (5.0 - 3.0 * ux);
-                                    state[x][y].in_fn[W] =
-                                        state[x][y].in_fn[E] - 2.0 / 3.0 * out_rho * ux;
-                                    state[x][y].in_fn[SW] =
-                                        state[x][y].in_fn[NE] - (ux - uy) / 6.0 * out_rho;
-                                    state[x][y].in_fn[NW] =
-                                        state[x][y].in_fn[SE] - (ux + uy) / 6.0 * out_rho;
+                    for b_cond in b_conds {
+                        if b_cond.rect.contains((new_x as i32, new_y as i32)) {
+                            match b_cond.boundary_type {
+                                BoundaryType::WallBounceBack => {
+                                    // if e.0 == 1 || (e.1 == 1 && e.0 == 0) {
+                                    if i % 2 == 1 {
+                                        state[x][y].in_fn[i] = state[x][y].out_fn[(i + 1)];
+                                    } else {
+                                        state[x][y].in_fn[i] = state[x][y].out_fn[(i - 1)];
+                                    }
                                 }
-                            } else {
-                                // Horizontal walls
-                                if new_y < 2 {
-                                    // upper wall
-                                    // state[x][y].in_fn[C] = state[x][y].out_fn[C];
-                                    // state[x][y].in_fn[N] = state[x][y].out_fn[N];
-                                    ux = -0.02;
-                                    uy = 0.0;
-                                    let cell = &state[x][y];
-                                    top_sum = (cell.in_fn[C]
-                                        + cell.in_fn[E]
-                                        + cell.in_fn[W]
-                                        + 2.0 * cell.in_fn[N]
-                                        + 2.0 * cell.in_fn[NW]
-                                        + 2.0 * cell.in_fn[NE]);
-                                    out_rho = top_sum / (1.0 + uy);
+                                BoundaryType::WallSymmetric => {
+                                    //let symmetric_mapping = [0,2,1,4,3,8,7,6,5];
+                                    let symmetric_mapping = [0, 2, 1, 4, 3, 7, 8, 5, 6];
+                                    state[x][y].in_fn[i] = state[x][y].out_fn[symmetric_mapping[i]];
+                                }
+                                BoundaryType::WallDirichlet => {
+                                    apply_velocity_bc(&mut state, x, y, side, b_cond);
+                                }
+                                BoundaryType::WallOpen => {
 
-                                    state[x][y].in_fn[N] =
-                                        state[x][y].in_fn[S] + 2.0 / 3.0 * out_rho * uy;
-                                    state[x][y].in_fn[NW] =
-                                        state[x][y].in_fn[SE] + (ux - uy) / 6.0 * out_rho;
-                                    state[x][y].in_fn[NE] =
-                                        state[x][y].in_fn[NW] - (ux + uy) / 6.0 * out_rho;
-                                } else {
-                                    // lower wall
-                                    ux = 0.0;
-                                    uy = 0.0;
-                                    // state[x][y].in_fn[C] = state[x][y].out_fn[C];
-                                    // state[x][y].in_fn[S] = state[x][y].out_fn[S];
-                                    let cell = &state[x][y];
-                                    top_sum = (cell.in_fn[C]
-                                        + cell.in_fn[E]
-                                        + cell.in_fn[W]
-                                        + 2.0 * cell.in_fn[S]
-                                        + 2.0 * cell.in_fn[SW]
-                                        + 2.0 * cell.in_fn[SE]);
-                                    out_rho = top_sum / (1.0 + uy);
-
-                                    uy = 0.0; //6.0 * (state[x][y].in_fn[N] - state[x][y].in_fn[S] + state[x][y].in_fn[NE] - state[x][y].in_fn[SE]) / out_rho / (5.0 - 3.0 * ux);
-                                    state[x][y].in_fn[S] =
-                                        state[x][y].in_fn[N] - 2.0 / 3.0 * out_rho * uy;
-                                    state[x][y].in_fn[SW] =
-                                        state[x][y].in_fn[NE] - (ux - uy) / 6.0 * out_rho;
-                                    state[x][y].in_fn[SE] =
-                                        state[x][y].in_fn[NW] + (ux + uy) / 6.0 * out_rho;
+                                    apply_open_bc(&mut state, x, y, side, b_cond);
                                 }
                             }
-
-                            // Left wall (ex. 2)
-                            //let ux = if x <= 2 {(n_y-y) as f32 / n_y as f32 * 0.02} else {0.0};
-                            // let cell = &state[x][y];
-                            // let top_sum = (cell.out_fn[0] + cell.out_fn[1] + cell.out_fn[2] +
-                            //     2.0 * cell.out_fn[4] + 2.0 * cell.out_fn[6] + 2.0*cell.out_fn[7]);
-                            //let u_n = top_sum / 0.95 + 1.0;
-                            //let out_rho = top_sum / (1.0 - ux);
-                            //let out_rho = if x >= n_x-3 {1.0} else {top_sum / (1.0 - ux)}; // Right wall (ex. 2)
-
-                            // state[x][y].in_fn[1] = state[x][y].out_fn[2] + 2.0/3.0 * out_rho * ux;
-                            // state[x][y].in_fn[5] = state[x][y].out_fn[6] + 1.0/6.0 * out_rho * ux;
-                            // state[x][y].in_fn[7] = state[x][y].out_fn[8] + 1.0/6.0 * out_rho * ux;
                         }
-                        WallType::WallOpen => {}
                     }
 
                     continue;
                 }
 
                 state[x][y].in_fn[i] = state[new_x][new_y].out_fn[i];
-
-                // if x == 2 || x == n_x - 3 || y == 2 {
-                //     state[x][y].velocity[1] = 0.0;
-                // }
             }
         }
     }

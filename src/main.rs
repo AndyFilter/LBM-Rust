@@ -1,22 +1,23 @@
 mod gui;
 mod sim;
+mod boundary;
 
-use crate::sim::{step_sim, WallType, PLOT_COLORS_U8};
-use crate::{sim::CellInfo, sim::CellType, sim::MIN_DENSITY_VAL};
-use eframe::egui::TextureOptions;
-use eframe::{egui, epaint, App, NativeOptions};
+use crate::sim::step_sim;
+use crate::{sim::CellInfo, sim::CellType};
+use crate::boundary::{BoundaryGroup, BoundaryType};
+use eframe::{egui, App, NativeOptions};
 use egui::Vec2;
-use image::{GenericImage, ImageBuffer, Rgba};
+use image::GenericImage;
 use rand::Rng;
 use std::fmt::{Debug, Display};
 use std::fs::File;
+use std::io;
 use std::io::{BufRead, BufWriter, Write};
 use std::time::Instant;
-use std::io;
 
 struct MyApp {
     sim: Vec<Vec<CellInfo>>, // NxN grid with states
-    // sim_state_change: Vec<Vec<u32>>,
+    boundary_conditions: Vec<BoundaryGroup>,
     sim_step: usize,
     last_sim_step: Instant,
 
@@ -24,6 +25,7 @@ struct MyApp {
     magnification: f32,
 
     velocity_view: bool,
+    show_trajectories: bool,
     is_playing: bool,
 }
 
@@ -118,7 +120,7 @@ impl MyApp {
 
             // cell.density = 1.0;
             cell.cell_type = CellType::try_from(parts[1].trim().parse::<u8>().unwrap()).unwrap();
-            cell.wall_type = WallType::try_from(parts[2].trim().parse::<u8>().unwrap()).unwrap();
+            //cell.boundary_type = BoundaryType::try_from(parts[2].trim().parse::<u8>().unwrap()).unwrap();
 
             // Recalculate rest of the parameters for this cell
             cell.density = cell.in_fn.iter().sum();
@@ -139,99 +141,15 @@ impl MyApp {
         }
 
         self.sim_step -= 1; // account for the step that does nothing
-        step_sim(&mut self.sim, &mut self.sim_step); // "fake" step used only to recalculate values
+        step_sim(&mut self.sim, &self.boundary_conditions, &mut self.sim_step); // "fake" step used only to recalculate values
         Ok(())
     }
-}
-
-fn map_range(from_range: (f32, f32), to_range: (f32, f32), s: f32) -> f32 {
-    to_range.0 + (s - from_range.0) * (to_range.1 - to_range.0) / (from_range.1 - from_range.0)
-}
-
-fn create_image_from_buffer(
-    buffer: &Vec<Vec<CellInfo>>,
-    width: u32,
-    height: u32,
-    ctx: &egui::Context,
-    velocity_view: bool,
-    velocity_axis: usize,
-    mut opt_image_buffer: Option<&mut ImageBuffer<Rgba<u8>, Vec<u8>>>,
-) -> egui::TextureHandle {
-    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
-    let velo_dimness = 2.0f32;
-
-    for (x, row) in buffer.iter().enumerate() {
-        for (y, &ref pixel) in row.iter().enumerate() {
-            let mut col = Rgba(PLOT_COLORS_U8[buffer[x][y].cell_type as usize]);
-            //if buffer[x][y].cell_type == CellTypeGas {
-            if velocity_view && pixel.cell_type != CellType::CellTypeWall {
-                if buffer[x][y].velocity[velocity_axis] >= 0.0 {
-                    col.0[0] = (256f32
-                        * map_range(
-                            (
-                                0.000 * velo_dimness / MIN_DENSITY_VAL,
-                                0.01 * velo_dimness / MIN_DENSITY_VAL,
-                            ),
-                            (0.01, 1.0),
-                            buffer[x][y].velocity[velocity_axis],
-                        ))
-                    .floor() as u8;
-                } else {
-                    col.0[2] = (256f32
-                        * map_range(
-                            (
-                                0.000 * velo_dimness / MIN_DENSITY_VAL,
-                                0.01 * velo_dimness / MIN_DENSITY_VAL,
-                            ),
-                            (0.01, 1.0),
-                            -buffer[x][y].velocity[velocity_axis],
-                        ))
-                    .floor() as u8;
-                }
-            } else if (256f32 * buffer[x][y].density).floor() as u8 > 0 {
-                // col.0[1] = 32;
-                // col.0[2] = 32;
-                //col.0[0] = (64f32 * buffer[x][y].density) as u8
-                col.0.fill(
-                    (256f32
-                        * map_range(
-                            (MIN_DENSITY_VAL - 0.08, MIN_DENSITY_VAL + 0.1),
-                            (0.1, 1.0),
-                            buffer[x][y].density,
-                        ))
-                    .floor() as u8,
-                );
-            }
-            col.0[3] = 255;
-            img.put_pixel(x as u32, y as u32, col);
-        }
-    }
-    if opt_image_buffer.is_some() {
-        let buffer = opt_image_buffer.unwrap();
-        //buffer = img.clone();
-        img.clone_into(buffer);
-        //opt_image_buffer.unwrap().copy_from(&img.clone(), img.width(), img.height()).expect("Could not copy image");
-        //opt_image_buffer.insert(&mut img.clone());
-    }
-
-    // Convert the ImageBuffer to a ColorImage for egui
-    let (width, height) = img.dimensions();
-    let pixels = img.into_raw();
-    let color_image =
-        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels);
-
-    let mut img_data = TextureOptions::default();
-    img_data.magnification = epaint::textures::TextureFilter::Nearest;
-    img_data.minification = epaint::textures::TextureFilter::Nearest;
-
-    // Use the context passed from the creation function
-    ctx.load_texture("sim_tex", color_image, img_data)
 }
 
 fn main() {
     let mut native_options = NativeOptions::default();
 
-    native_options.viewport.inner_size = Some(Vec2::new(2450f32, 850f32));
+    native_options.viewport.inner_size = Some(Vec2::new(1400f32, 850f32));
     eframe::run_native(
         "LBM-Rust",
         native_options,
